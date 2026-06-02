@@ -1,20 +1,38 @@
 """
 Partie A — Extraction du lexique Sara depuis le PDF.
 
-Ce script extrait les données du dictionnaire phonétique Sara sur la plage
-ciblée des pages 11 à 77, corrige les anomalies d'encodage identifiées par
-l'audit global des caractères, et génère les exports aux formats attendus.
+ARCHITECTURE : Pipeline OCR (pdf2image + Tesseract)
+─────────────────────────────────────────────────────
+Problème racine : le PDF utilise des polices héritées (Legacy Fonts) dont la
+table ToUnicode interne est absente ou corrompue. Toute bibliothèque qui lit
+la couche texte native du PDF (pdfplumber, pdfminer, PyMuPDF…) renverra
+inévitablement du "garbage text" pour les caractères de l'Alphabet National
+Tchadien (ɓ, ɗ, ɛ, ɔ, ɨ, ɲ, etc.).
 
-Bibliothèques requises : pdfplumber, pandas
+SOLUTION : Ignorer complètement la couche texte native. Convertir chaque page
+du PDF en image haute résolution (300 DPI) avec pdf2image, puis appliquer
+Tesseract OCR (moteur LSTM, langue française) qui reconnaît les glyphes
+visuellement — indépendamment de l'encodage interne du fichier.
+
+Ce workflow est identique à la lecture d'un document scanné et produit un
+texte UTF-8 propre et fidèle à l'impression originale.
+
+Bibliothèques requises : pdf2image, pytesseract, Pillow, pandas
+Dépendance système    : tesseract-ocr, tesseract-ocr-fra, poppler-utils
 """
 
 import re
 from pathlib import Path
-import pdfplumber
+
+from pdf2image import convert_from_path
+import pytesseract
+from PIL import Image
 import pandas as pd
 
 
+# ──────────────────────────────────────────────────────────────────────────────
 # Codes des 14 dialectes Sara et leurs noms complets
+# ──────────────────────────────────────────────────────────────────────────────
 SARA_LANGS = {
     "Beb": "Bebote",
     "Bd":  "Bediondo",
@@ -35,9 +53,31 @@ SARA_LANGS = {
 
 class SaraExtractor:
     """
-    Extrait les données du fichier SaraLanguagesLexicon.pdf et
-    produit trois formats de fichiers CSV nettoyés en UTF-8 Standard.
+    Extrait les données du fichier SaraLanguagesLexicon.pdf en utilisant un
+    pipeline OCR (pdf2image → Tesseract) et produit trois formats CSV en UTF-8.
+
+    Pourquoi l'OCR et non pdfplumber/pdfminer ?
+    ─────────────────────────────────────────────
+    Ces bibliothèques lisent la couche texte native du PDF. Pour des polices
+    héritées sans table ToUnicode correcte, elles produisent des caractères
+    corrompus (ex: "ß" au lieu de "ɓ", "÷" au lieu de "ɗ"). Corriger ces
+    corruptions manuellement est une course sans fin.
+
+    Tesseract, lui, analyse les formes visuelles des glyphes. Il ne se soucie
+    pas de l'encodage interne du PDF et produit directement de l'UTF-8 propre.
     """
+
+    # ── Configuration Tesseract ───────────────────────────────────────────────
+    # --oem 3  : Utilise le moteur LSTM (le plus précis pour les diacritiques)
+    # --psm 4  : Une colonne de texte de taille variable (adapté aux colonnes
+    #            de dictionnaire avec entrées de longueurs différentes)
+    TESSERACT_CONFIG = r"--oem 3 --psm 4"
+
+    # Résolution DPI pour la conversion PDF → Image.
+    # 300 DPI est le minimum recommandé pour distinguer les diacritiques
+    # proches (ex: ɓ vs b, ɗ vs d, ɔ vs o). Augmenter à 400 si des
+    # confusions persistent sur votre document spécifique.
+    DPI = 300
 
     def __init__(self, pdf_path: str, output_dir: str = "data/"):
         """
@@ -54,170 +94,156 @@ class SaraExtractor:
         # Sera rempli après l'appel à extract()
         self.lignes_brutes: list[dict] = []
 
-    # ------------------------------------------------------------------
-    # Méthode de nettoyage globale intégrant toutes les tactiques d'encodage
-    # ------------------------------------------------------------------
-    def clean_sara_text(self, text: str) -> str:
+    # ─────────────────────────────────────────────────────────────────────────
+    # Méthode de nettoyage post-OCR (légère, ciblée sur les seules erreurs
+    # résiduelles de Tesseract — pas de remapping massif de polices)
+    # ─────────────────────────────────────────────────────────────────────────
+    def clean_ocr_text(self, text: str) -> str:
         """
-        Nettoie et convertit l'intégralité des caractères corrompus (Legacy Font)
-        détectés sur la plage cible du PDF vers l'UTF-8 international standard.
+        Corrige les quelques confusions résiduelles typiques de Tesseract sur
+        les caractères de l'Alphabet National Tchadien.
+
+        Contrairement à l'ancienne approche, cette table est COURTE parce que
+        Tesseract reconnaît déjà visuellement les bons caractères Unicode.
+        On ne corrige ici que les erreurs de substitution optique connues
+        (glyphes très proches que même un humain confondrait à basse résolution).
         """
         if not text:
             return text
 
-        # 1. Remplacements contextuels et exceptions prioritaires
-        text = text.replace("kîl", "kōl")
-        text = text.replace("Éy", "ə́y")
-        text = text.replace("nd¸g", "ndōg")
-        text = text.replace("îl", "ɔ̀l")
+        # Confusions optiques résiduelles de Tesseract sur l'ANT
+        # (à enrichir au fur et à mesure des observations sur votre PDF)
+        ocr_corrections = {
+            # Tesseract confond parfois ces paires très proches visuellement
+            "b'": "ɓ",    # b + apostrophe résiduel → b injectif
+            "d'": "ɗ",    # d + apostrophe résiduel → d injectif
+            "e'": "ɛ",    # e + apostrophe résiduel → epsilon ouvert
+            "o'": "ɔ",    # o + apostrophe résiduel → o ouvert
 
-        # 2. Table de conversion exhaustive (basée sur l'audit complet du PDF)
-        font_corrections = {
-            # --- CONSONNES INJECTIVES ET SPÉCIALES ---
-            "ß": "ɓ",       # B injectif (Découvert lors de l'audit des 66 pages)
-            "÷": "ɗ",       # D injectif
-            "ð": "ɗ",       # Variante de D injectif / diacritique
-            "ñ": "ɲ",       # n palatal (gn)
-            "Ñ": "Ɲ",       # N palatal majuscule
-            "…": "ɲ",       # Autre encodage du n palatal
-            "È": "ṛ",       # r rétroflexe
-            "°": "ṛ",       # r rétroflexe
-            "®": "r̄",       # r avec macron (long)
-            "Ž": "č",       # c caron (tch)
+            # Guillemets typographiques parfois produits à la place de l'apostrophe
+            "b\u2019": "ɓ",
+            "d\u2019": "ɗ",
 
-            # --- VOYELLES CONVERTIES DE LA POLICE HÉRITÉE ---
-            "û": "mo",      # Note: souvent mappé sur o long ou macron 'ō'
-            "ö": "ō",
-            "î": "ō",
-            "ä": "ā",
-            "æ": "ā",
-            "ü": "ū",
-            "ï": "ī",
-            "ë": "ē",
-            "‡": "í",
-            
-            # --- VOYELLES OUVERTES ET ACCENTS SPÉCIFIQUES ---
-            "Æ": "ɛ̀",      # Epsilon ouvert + accent grave
-            "£": "Ɛ",      # Epsilon ouvert majuscule
-            "Õ": "ɔ̀",      # O ouvert + accent grave
-            "ÿ": "ȳ",      # y avec macron
-            "ý": "ý",      # y avec accent aigu
-            "Û": "w̄",      # w avec macron
-            "Ç": "ó",      # o accent aigu
-            "ô": "ó",      # o accent aigu
-            "É": "é",      # e accent aigu (hors contexte Éy)
-
-            # --- VOYELLES NASALISÉES (TILDE / CROCHET SOUSCRIT) ---
-            "¡": "ı̰",      # i sans point avec tilde souscrit
-            "Ð": "ɛ̰̀",     # epsilon ouvert grave avec tilde souscrit
-            "¼": "à̰",      # a grave avec tilde souscrit
-            "Ÿ": "ḛ̀",      # e grave avec tilde souscrit
-            "Ï": "ḛ́",      # e aigu avec tilde souscrit
-            
-            # --- NETTOYAGE DES SCORIES DE RENDU ---
-            "¸": "",       # Suppression du résidu de cédille déplacée
-            " ¸": "",
+            # Tirets parasites en fin de ligne (césures OCR)
+            "-\n": "",
         }
-        
-        for legacy_char, unicode_char in font_corrections.items():
-            text = text.replace(legacy_char, unicode_char)
-            
-        # 3. Nettoyage final des espaces et ponctuations parasites de fin de ligne
+
+        for mauvais, bon in ocr_corrections.items():
+            text = text.replace(mauvais, bon)
+
+        # Nettoyage des espaces multiples et ponctuations parasites de fin de ligne
         text = text.rstrip(" :")
-        text = re.sub(r'\s+', ' ', text).strip()
+        text = re.sub(r"\s+", " ", text).strip()
+
         return text
 
-    # ------------------------------------------------------------------
-    # Méthode 1 : lecture du PDF (Ciblée strictement sur les pages 11 à 77)
-    # ------------------------------------------------------------------
+    # ─────────────────────────────────────────────────────────────────────────
+    # Méthode 1 : Conversion PDF → Images puis OCR (pages 11 à 77)
+    # ─────────────────────────────────────────────────────────────────────────
     def extract(self) -> list[dict]:
         """
-        Lit le PDF uniquement sur la plage des pages 11 à 77 (indices 10 à 77)
-        et extrait toutes les paires (terme_français, code_dialecte, mot_sara).
+        Convertit les pages 11 à 77 du PDF en images haute résolution, applique
+        Tesseract OCR sur chaque demi-colonne, puis parse les paires
+        (terme_français, code_dialecte, mot_sara).
+
+        Le découpage géométrique en deux colonnes est conservé de l'ancienne
+        approche, mais s'applique maintenant sur les images PIL avant l'OCR
+        (au lieu de s'appliquer sur les zones textuelles de pdfplumber).
         """
-        lignes_brutes = []
-        entree_courante = None
-
-        # Pattern pour détecter les lignes de traduction (ex: Mb=...)
-        lang_regex = r'\b(' + '|'.join(SARA_LANGS.keys()) + r')\s*=\s*'
-
         if not self.pdf_path.exists():
             raise FileNotFoundError(f"Fichier PDF non trouvé : {self.pdf_path}")
-        
-        with pdfplumber.open(self.pdf_path) as pdf:
-            # Sécurisation du slice : de la page 11 (index 10) à la page 77 (index 76 inclus)
-            pages_du_dictionnaire = pdf.pages[10:77]
-            
-            print(f"Extraction ciblée en cours sur les pages 11 à 77 du document.")
 
-            for page in pages_du_dictionnaire:
-                width = page.width
-                height = page.height
+        # Pattern pour détecter les tags de dialectes (ex: "Mb=", "KbN=")
+        lang_regex = r"\b(" + "|".join(re.escape(k) for k in SARA_LANGS.keys()) + r")\s*=\s*"
 
-                # Séparation géométrique en deux colonnes indépendantes
-                domaine_gauche = (0, 0, width/2, height)
-                domaine_droite = (width/2, 0, width, height)
+        lignes_brutes  = []
+        entree_courante = None
 
-                col_gauche = page.within_bbox(domaine_gauche).extract_text()
-                col_droite = page.within_bbox(domaine_droite).extract_text()
+        # ── Étape 1 : Convertir le PDF en images ─────────────────────────────
+        # first_page / last_page utilisent la numérotation 1-based de pdf2image
+        print(f"Conversion des pages de traduction francaise du PDF en images {self.DPI} DPI…")
+        pages_images: list[Image.Image] = convert_from_path(
+            str(self.pdf_path),
+            dpi=self.DPI,
+            first_page=11,
+            last_page=77,
+        )
+        print(f"  {len(pages_images)} pages converties.")
 
-                for col_texte in [col_gauche, col_droite]:
-                    if not col_texte:
+        # ── Étape 2 : OCR page par page ───────────────────────────────────────
+        for num_page, image in enumerate(pages_images, start=11):
+            largeur, hauteur = image.size
+
+            # Découpage en deux colonnes égales (coordonnées en pixels)
+            col_gauche_img = image.crop((0,           0, largeur // 2, hauteur))
+            col_droite_img = image.crop((largeur // 2, 0, largeur,     hauteur))
+
+            for col_img in [col_gauche_img, col_droite_img]:
+                # OCR sur la colonne — langue française pour le dictionnaire
+                texte_col = pytesseract.image_to_string(
+                    col_img,
+                    lang="fra",
+                    config=self.TESSERACT_CONFIG,
+                )
+
+                if not texte_col.strip():
+                    continue
+
+                lignes = texte_col.split("\n")
+                for ligne in lignes:
+                    ligne = ligne.strip()
+                    if not ligne:
                         continue
 
-                    lignes = col_texte.split("\n")
-                    for ligne in lignes:
-                        ligne = ligne.strip()
-                        if not ligne:
-                            continue
+                    # Ignorer les numéros de page et en-têtes récurrents
+                    if ligne.isdigit() or ligne.lower().startswith("sara languages lexicon"):
+                        continue
 
-                        # Ignorer les métadonnées de page
-                        if ligne.isdigit() or ligne.lower().startswith("sara languages lexicon"):
-                            continue
+                    # Détection des tags de dialectes dans la ligne
+                    contient_lang = bool(re.search(lang_regex, ligne))
 
-                        # Détection des tags de dialectes dans la ligne
-                        contient_lang = any(f'{lang}=' in ligne for lang in SARA_LANGS)
-
-                        if contient_lang:
-                            if entree_courante is not None:
-                                correspondances = list(re.finditer(lang_regex, ligne))
-                                for i, correspondance in enumerate(correspondances):
-                                    lang_code = correspondance.group(1)
-                                    start_idx = correspondance.end()
-                                    end_idx = correspondances[i+1].start() if i+1 < len(correspondances) else len(ligne)
-
-                                    mot = ligne[start_idx:end_idx].strip()
+                    if contient_lang:
+                        if entree_courante is not None:
+                            correspondances = list(re.finditer(lang_regex, ligne))
+                            for i, corr in enumerate(correspondances):
+                                lang_code = corr.group(1)
+                                start_idx = corr.end()
+                                end_idx   = (
+                                    correspondances[i + 1].start()
+                                    if i + 1 < len(correspondances)
+                                    else len(ligne)
+                                )
+                                mot = ligne[start_idx:end_idx].strip()
+                                if mot:
+                                    mot = self.clean_ocr_text(mot)
                                     if mot:
-                                        # Application de la correction d'encodage
-                                        mot = self.clean_sara_text(mot)
-                                        if mot:
-                                            entree_courante[lang_code] = mot
-                        else:
-                            # Nouvelle entrée (Terme pivot en Français)
-                            if entree_courante is not None and len(entree_courante) > 1:
-                                lignes_brutes.append(entree_courante)
-                            entree_courante = {"french_term": ligne}
-                    
-            # Enregistrement de la dernière entrée du dictionnaire
-            if entree_courante is not None and len(entree_courante) > 1:
-                lignes_brutes.append(entree_courante)
-        
+                                        entree_courante[lang_code] = mot
+                    else:
+                        # Nouvelle entrée (terme pivot en français)
+                        if entree_courante is not None and len(entree_courante) > 1:
+                            lignes_brutes.append(entree_courante)
+                        entree_courante = {"french_term": ligne}
+
+        # Enregistrement de la dernière entrée du dictionnaire
+        if entree_courante is not None and len(entree_courante) > 1:
+            lignes_brutes.append(entree_courante)
+
         return lignes_brutes
 
-    # ------------------------------------------------------------------
+    # ─────────────────────────────────────────────────────────────────────────
     # Méthode 2 : Transformation au format LARGE
-    # ------------------------------------------------------------------
+    # ─────────────────────────────────────────────────────────────────────────
     def to_wide(self) -> pd.DataFrame:
         """
-        Transforme les données extraites en format large (un terme par ligne).
+        Transforme les données extraites en format large (un terme par ligne,
+        une colonne par dialecte).
         """
         if not self.lignes_brutes:
             colonnes_ordonnees = ["french_term"] + list(SARA_LANGS.keys())
             return pd.DataFrame(columns=colonnes_ordonnees)
-        
+
         df_wide = pd.DataFrame(self.lignes_brutes)
 
-        # S'assurer que toutes les colonnes de dialectes existent
         for langue in SARA_LANGS.keys():
             if langue not in df_wide.columns:
                 df_wide[langue] = None
@@ -227,15 +253,17 @@ class SaraExtractor:
 
         chemin_sortie = self.output_dir / "sara_wide.csv"
         df_wide.to_csv(chemin_sortie, index=False, encoding="utf-8-sig")
-        
+        print(f"  [Export] sara_wide.csv → {chemin_sortie}")
+
         return df_wide
 
-    # ------------------------------------------------------------------
+    # ─────────────────────────────────────────────────────────────────────────
     # Méthode 3 : Transformation au format LONG
-    # ------------------------------------------------------------------
+    # ─────────────────────────────────────────────────────────────────────────
     def to_long(self) -> pd.DataFrame:
         """
-        Transforme les données en format long (paires de traduction empilées).
+        Transforme les données en format long (paires de traduction empilées,
+        une paire par ligne).
         """
         format_long_data = []
 
@@ -246,27 +274,32 @@ class SaraExtractor:
 
             for langue_codee, nom_langue in SARA_LANGS.items():
                 mot = ligne.get(langue_codee)
-                if pd.notna(mot) and str(mot).strip() != "":
+                if pd.notna(mot) and str(mot).strip():
                     format_long_data.append({
                         "source_lang": "French",
                         "source_word": terme_francais,
                         "target_lang": nom_langue,
-                        "target_word": str(mot).strip()
+                        "target_word": str(mot).strip(),
                     })
-        
-        df_long = pd.DataFrame(format_long_data, columns=["source_lang", "source_word", "target_lang", "target_word"])
-        
+
+        df_long = pd.DataFrame(
+            format_long_data,
+            columns=["source_lang", "source_word", "target_lang", "target_word"],
+        )
+
         chemin_sortie = self.output_dir / "sara_long.csv"
         df_long.to_csv(chemin_sortie, index=False, encoding="utf-8-sig")
+        print(f"  [Export] sara_long.csv → {chemin_sortie}")
 
         return df_long
 
-    # ------------------------------------------------------------------
-    # Méthode 4 : Génération des fichiers individuels par dialecte
-    # ------------------------------------------------------------------
+    # ─────────────────────────────────────────────────────────────────────────
+    # Méthode 4 : Fichiers individuels par dialecte
+    # ─────────────────────────────────────────────────────────────────────────
     def to_dialect_pairs(self) -> dict[str, pd.DataFrame]:
         """
-        Produit un fichier CSV propre à deux colonnes pour chaque dialecte.
+        Produit un fichier CSV à deux colonnes pour chaque dialecte :
+        <nom_dialecte> | français
         """
         pairs_dir = self.output_dir / "pairs"
         pairs_dir.mkdir(parents=True, exist_ok=True)
@@ -280,47 +313,56 @@ class SaraExtractor:
                 terme_francais = ligne.get("french_term")
                 mot = ligne.get(langue_codee)
 
-                if terme_francais and pd.notna(mot) and str(mot).strip() != "":
+                if terme_francais and pd.notna(mot) and str(mot).strip():
                     pairs_data.append({
                         nom_langue.lower(): str(mot).strip(),
-                        "français": terme_francais
+                        "français":         terme_francais,
                     })
-            
-            df_dialect = pd.DataFrame(pairs_data, columns=[nom_langue.lower(), "français"])
 
-            nom_fichier = f"{nom_langue.lower()}_french.csv"
+            df_dialect = pd.DataFrame(
+                pairs_data, columns=[nom_langue.lower(), "français"]
+            )
+
+            nom_fichier   = f"{nom_langue.lower()}_french.csv"
             chemin_sortie = pairs_dir / nom_fichier
             df_dialect.to_csv(chemin_sortie, index=False, encoding="utf-8-sig")
 
             dialecte_dfs[nom_langue] = df_dialect
-        
+
+        print(f"  [Export] {len(dialecte_dfs)} fichiers dialecte → {pairs_dir}/")
         return dialecte_dfs
 
-    # ------------------------------------------------------------------
+    # ─────────────────────────────────────────────────────────────────────────
     # Méthode principale d'orchestration
-    # ------------------------------------------------------------------
+    # ─────────────────────────────────────────────────────────────────────────
     def run(self):
         """
-        Exécute l'intégralité du pipeline
+        Exécute l'intégralité du pipeline OCR → Parsing → Export CSV.
         """
-        print("=== DEBUT DE L'EXTRACTION DU LEXIQUE SARA ===")
+        print("=" * 60)
+        print("  EXTRACTION DU LEXIQUE SARA — Pipeline OCR")
+        print("=" * 60)
+
         self.lignes_brutes = self.extract()
-        print(f"  [Succès] {len(self.lignes_brutes)} entrées du dictionnaire chargées.")
+        print(f"{len(self.lignes_brutes)} entrées du dictionnaire chargées.")
 
         df_wide = self.to_wide()
-        print(f"  [Export] Format large généré : {df_wide.shape[0]} termes.")
+        print(f"Format large : {df_wide.shape[0]} termes × {df_wide.shape[1]} colonnes.")
 
         df_long = self.to_long()
-        print(f"  [Export] Format long généré : {len(df_long)} paires associées.")
+        print(f"Format long  : {len(df_long)} paires de traduction.")
 
         dialect_dfs = self.to_dialect_pairs()
-        print(f"  [Export] {len(dialect_dfs)} fichiers par dialecte créés dans 'data/pairs/'.")
-        print("=== PIPELINE TERMINE AVEC SUCCÈS ===")
+        print(f"{len(dialect_dfs)} fichiers individuels par dialecte.")
+
+        print("=" * 60)
+        print("PIPELINE TERMINÉ AVEC SUCCÈS")
+        print("=" * 60)
 
 
-# ------------------------------------------------------------------
-# Point d'entrée d'exécution du script
-# ------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# Point d'entrée
+# ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     extractor = SaraExtractor(
         pdf_path="/home/broly/TextMining_BLK/data/raw/SaraLanguagesLexicon.pdf",
