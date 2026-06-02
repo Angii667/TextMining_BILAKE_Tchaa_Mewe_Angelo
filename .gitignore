@@ -1,0 +1,16 @@
+# Environnement virtuel
+.venv/
+.examen_finale/
+__pycache__/
+*.pyc
+*.pyo
+
+# Données générées (à ne pas publier)
+data/processed/
+figures/
+data/raw/
+
+# Fichiers temporaires
+*.log
+.DS_Store
+Thumbs.db
