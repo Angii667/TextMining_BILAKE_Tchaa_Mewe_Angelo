@@ -54,45 +54,101 @@ class SaraExtractor:
         self.lignes_brutes: list[dict] = []
 
     # ------------------------------------------------------------------
-    # Méthode 1 : lecture du PDF
+    # Méthode de nettoyage globale validée par l'audit des 66 pages
     # ------------------------------------------------------------------
+    def clean_sara_text(self, text: str) -> str:
+        """
+        Nettoie et convertit l'intégralité des caractères corrompus (Legacy Font)
+        détectés sur la plage cible du PDF vers l'UTF-8 international standard.
+        """
+        if not text:
+            return text
 
+        # 1. Remplacements contextuels et exceptions prioritaires
+        text = text.replace("kîl", "kōl")
+        text = text.replace("Éy", "ə́y")
+        text = text.replace("nd¸g", "ndōg")
+        text = text.replace("îl", "ɔ̀l")
+
+        # 2. Table de conversion exhaustive (mapping SIL Legacy vers Unicode)
+        font_corrections = {
+            # --- VOYELLES OUVERTES ET CENTRALES SARA ---
+            "Æ": "ɛ",       # E ouvert (ex: kÆm -> kɛm)
+            "æ": "ɛ",       # E ouvert ou Schwa selon la variante dialectale
+            "Õ": "ɔ",       # O ouvert (ex: kÕ-ndû-g¸ -> kɔ̄-ndū-gə)
+            "õ": "ɔ",       # O ouvert (variante minuscule)
+            "‡": "ɨ",       # Voyelle centrale haute barrée (ex: k‡rª -> kɨ̄rā)
+            "¸": "ə",       # Schwa / Voyelle centrale moyenne (ex: màd¸ -> màdə)
+
+            # --- CONSONNES SPÉCIALES ET LIQUIDES ---
+            "£": "l",       # L standard ou liquide flappée (ex: yÆ£ -> yɛl)
+            "¥": "l",       # L ou R flappé selon le dialecte
+            "®": "r",       # R rétroflexe / battu (ex: gÆ® -> gɛr)
+            "÷": "ɽ",       # R battu / flappé spécifique (ex: ÷á -> ɽá)
+            "•": "r",       # Scorie d'accent ou R flappé (ex: bö• -> bōr)
+
+            # --- CORRECTIONS DES PREMIÈRES PAGES ---
+            "5": "ɔ",       # Chiffre utilisé pour le O ouvert
+            "6": "ɓ",       # Chiffre utilisé pour l'implosive bilabiale
+            "3": "ɓ",       # Chiffre parfois substitué à l'implosive majuscule
+            "王": "ī",      # Idéogramme parasite, corruption de 'i' à ton moyen
+            "±": "ī",       # Signe plus/moins substitué pour un 'i' centralisé
+
+            # --- ACCENTS ET DIACRITIQUES DE TONS COMBINÉS ---
+            "ä": "ā",       # 'a' avec ton moyen (macron)
+            "ë": "ē",       # 'e' avec ton moyen
+            "ï": "ī",       # 'i' avec ton moyen ou haut
+            "ö": "ó",       # 'o' avec ton haut (ex: òö -> òó)
+            "ü": "ū",       # 'u' avec ton moyen ou haut
+            "û": "ú",       # 'u' avec ton haut (ex: ndû -> ndú)
+            "î": "í",       # 'i' avec ton haut ou descendant
+            "ô": "ó",       # 'o' avec ton haut
+            "ª": "á",       # Exposant 'a' traduisant un ton haut
+            "º": "ɔ́",       # Degré traduisant un O ouvert avec ton haut
+            "Ç": "ɔ́",       # C cédille traduisant un O ouvert majuscule ou accentué
+
+            # --- NETTOYAGE DES SCORIES DE PARSING ---
+            " :": "",       # Suppression des deux-points parasites en fin de mot
+        }
+
+        for legacy_char, unicode_char in font_corrections.items():
+            text = text.replace(legacy_char, unicode_char)
+
+        # 3. Nettoyage final des espaces et ponctuations parasites
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
+    # ------------------------------------------------------------------
+    # Méthode 1 : lecture du PDF (Ciblée sur les pages 11 à 77)
+    # ------------------------------------------------------------------
     def extract(self) -> list[dict]:
         """
-        Lit le PDF page par page et extrait toutes les paires
-        (terme_français, code_dialecte, mot_sara).
-
-        Conseils :
-        - Chaque page est divisée en deux colonnes. Pensez à séparer
-          la partie gauche et la partie droite avant de parser.
-        - Une entrée se compose d'une ligne de terme français suivie
-          d'une ou plusieurs lignes du type : Mb=mot Gor=mot Sr=mot …
-        - Ignorez les numéros de page, titres et lignes vides.
-
-        Returns:
-            Liste de dicts, chacun ayant la structure :
-            {"french_term": str, "Mb": str, "Gor": str, ...}
-            (seuls les dialectes présents sont inclus pour chaque terme)
+        Lit le PDF uniquement sur la plage des pages 11 à 77 (indices 10 à 77)
+        et extrait toutes les paires (terme_français, code_dialecte, mot_sara).
         """
         lignes_brutes = []
         entree_courante = None
 
-        #Pattern pour détecter les lignes de traduction
+        # Pattern pour détecter les lignes de traduction
         lang_regex = r'\b(' + '|'.join(SARA_LANGS.keys()) + r')\s*=\s*'
 
         if not self.pdf_path.exists():
             raise FileNotFoundError(f"Fichier PDF non trouvé : {self.pdf_path}")
         
         with pdfplumber.open(self.pdf_path) as pdf:
-            for page in pdf.pages:
+            # Sécurisation du slice : de la page 11 (index 10) à la page 77 (index 76 inclus)
+            pages_du_dictionnaire = pdf.pages[10:77]
+            
+            print(f"  [Analyse] Extraction ciblée sur {len(pages_du_dictionnaire)} pages (Pages 11 à 77).")
+
+            for page in pages_du_dictionnaire:
                 width = page.width
                 height = page.height
 
-                #Definition des des limites de collision pour separer les deux colonnes
+                # Séparation en deux colonnes strictes
                 domaine_gauche = (0, 0, width/2, height)
                 domaine_droite = (width/2, 0, width, height)
 
-                #Définition du texte par zone géographique de page
                 col_gauche = page.within_bbox(domaine_gauche).extract_text()
                 col_droite = page.within_bbox(domaine_droite).extract_text()
 
@@ -100,40 +156,38 @@ class SaraExtractor:
                     if not col_texte:
                         continue
 
-                    lignes = col_texte.split("\n") # saut de ligne comme séparateur
+                    lignes = col_texte.split("\n")
                     for ligne in lignes:
                         ligne = ligne.strip()
                         if not ligne:
                             continue
 
-                        #Nettoyage, on va ignorer les numeros de pages isolés ou les en-tetes évidents
+                        # Ignorer les en-têtes et numéros de pages
                         if ligne.isdigit() or ligne.lower().startswith("sara languages lexicon"):
                             continue
 
-                        #Détection de la présence d'au moins un dialect codé
+                        # Détection des tags dialectes
                         contient_lang = any(f'{lang}=' in ligne for lang in SARA_LANGS)
 
                         if contient_lang:
                             if entree_courante is not None:
-                                #trouver toutes les positions des tags "Dialecte=" sur la ligne
                                 correspondances = list(re.finditer(lang_regex, ligne))
                                 for i, correspondance in enumerate(correspondances):
                                     lang_code = correspondance.group(1)
                                     start_idx = correspondance.end()
-                                    #Le mot s'arrete au prochain match ou à la fin de la ligne
-                                    end_idx = correspondances[i+1].start() if i+1<len(correspondances) else len(ligne)
+                                    end_idx = correspondances[i+1].start() if i+1 < len(correspondances) else len(ligne)
 
                                     mot = ligne[start_idx:end_idx].strip()
                                     if mot:
-                                        entree_courante[lang_code] = mot #On obtient au final entree_courante un dictionnaire qui a chaque dialecte à ses mots correspondant
-                        
+                                        mot = self.clean_sara_text(mot)
+                                        if mot:
+                                            entree_courante[lang_code] = mot
                         else:
-                            #C'est une ligne de terme francais (nouvelle entrée)
-                            if entree_courante is not None and len(entree_courante)>1:
+                            # Nouvelle entrée (Terme en Français)
+                            if entree_courante is not None and len(entree_courante) > 1:
                                 lignes_brutes.append(entree_courante)
-                            entree_courante = {"french_term":ligne}
+                            entree_courante = {"french_term": ligne}
                     
-            #On n'oublie pas de sauvegarder le tout dernier élément traité
             if entree_courante is not None and len(entree_courante) > 1:
                 lignes_brutes.append(entree_courante)
         
@@ -142,38 +196,23 @@ class SaraExtractor:
     # ------------------------------------------------------------------
     # Méthode 2 : format large
     # ------------------------------------------------------------------
-
     def to_wide(self) -> pd.DataFrame:
         """
-        Transforme les données extraites en format large :
-        une ligne par terme français, une colonne par dialecte.
-
-        Les cellules vides (dialecte non traduit) sont représentées
-        par une chaîne vide ou NaN.
-
-        Ordre des colonnes : ["french_term", "Beb", "Bd", ..., "NgT"]
-
-        Sauvegarde : output_dir/sara_wide.csv (encodage utf-8-sig)
-
-        Returns:
-            DataFrame au format large.
+        Transforme les données extraites en format large (un terme par ligne).
         """
         if not self.lignes_brutes:
             colonnes_ordonnees = ["french_term"] + list(SARA_LANGS.keys())
-            return pd.DataFrame(columns= colonnes_ordonnees)
+            return pd.DataFrame(columns=colonnes_ordonnees)
         
         df_wide = pd.DataFrame(self.lignes_brutes)
 
-        #Garantir de toutes les colonnes de dialectes meme vides existent
         for langue in SARA_LANGS.keys():
             if langue not in df_wide.columns:
                 df_wide[langue] = None
 
-        #On va ordonner rigoureusement les colonnes selon la consigne
         colonnes_ordonnees = ["french_term"] + list(SARA_LANGS.keys())
         df_wide = df_wide[colonnes_ordonnees]
 
-        #Sauvegarde
         chemin_sortie = self.output_dir / "sara_wide.csv"
         df_wide.to_csv(chemin_sortie, index=False, encoding="utf-8-sig")
         
@@ -182,25 +221,9 @@ class SaraExtractor:
     # ------------------------------------------------------------------
     # Méthode 3 : format long
     # ------------------------------------------------------------------
-
     def to_long(self) -> pd.DataFrame:
         """
-        Transforme les données en format long :
-        une ligne par paire (terme_français, dialecte, mot_sara).
-
-        Colonnes : source_lang, source_word, target_lang, target_word
-
-        - source_lang  : toujours "French"
-        - source_word  : le terme français
-        - target_lang  : le nom complet du dialecte (ex. "Mbay")
-        - target_word  : le mot dans ce dialecte
-
-        Que les paires où le mot Sara n'est pas vide sont incluses
-
-        Sauvegarde : output_dir/sara_long.csv (encodage utf-8-sig)
-
-        Returns:
-            DataFrame au format long.
+        Transforme les données en format long (paires de traduction empilées).
         """
         format_long_data = []
 
@@ -211,41 +234,29 @@ class SaraExtractor:
 
             for langue_codee, nom_langue in SARA_LANGS.items():
                 mot = ligne.get(langue_codee)
-                #On ne conserve que si le mot existe et n'est pas vide
                 if pd.notna(mot) and str(mot).strip() != "":
                     format_long_data.append({
-                        "source_lang":"French",
+                        "source_lang": "French",
                         "source_word": terme_francais,
                         "target_lang": nom_langue,
                         "target_word": str(mot).strip()
                     })
         
-        df_long = pd.DataFrame(format_long_data, columns = ["source_lang","source_word", "target_lang", "target_word"])
-        #Sauvegarde
+        df_long = pd.DataFrame(format_long_data, columns=["source_lang", "source_word", "target_lang", "target_word"])
+        
         chemin_sortie = self.output_dir / "sara_long.csv"
         df_long.to_csv(chemin_sortie, index=False, encoding="utf-8-sig")
 
         return df_long
-    # ------------------------------------------------------------------
-    # Méthode 4 : fichiers par dialecte
-    # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Méthode 4 : fichiers individuels par dialecte
+    # ------------------------------------------------------------------
     def to_dialect_pairs(self) -> dict[str, pd.DataFrame]:
         """
-        Produit un fichier CSV à deux colonnes pour chaque dialecte.
-
-        Pour le dialecte "Mbay" (code "Mb"), le fichier aura :
-        - Nom : pairs/mbay_french.csv
-        - Colonnes : mbay | français
-
-        Seules les lignes où le mot Sara n'est pas vide seront conservées.
-
-        Sauvegarde : output_dir/pairs/{nom_dialecte_lower}_french.csv
-
-        Returns:
-            Dictionnaire {nom_dialecte: DataFrame}
+        Produit un fichier CSV propre à deux colonnes pour chaque dialecte.
         """
-        pairs_dir = self.output_dir/"pairs"
+        pairs_dir = self.output_dir / "pairs"
         pairs_dir.mkdir(parents=True, exist_ok=True)
 
         dialecte_dfs = {}
@@ -257,15 +268,14 @@ class SaraExtractor:
                 terme_francais = ligne.get("french_term")
                 mot = ligne.get(langue_codee)
 
-                if terme_francais and pd.notna(mot) and str(mot).strip() !="":
+                if terme_francais and pd.notna(mot) and str(mot).strip() != "":
                     pairs_data.append({
                         nom_langue.lower(): str(mot).strip(),
                         "français": terme_francais
                     })
-            #Géneration du DataFrame pour le dialecte en cours
+            
             df_dialect = pd.DataFrame(pairs_data, columns=[nom_langue.lower(), "français"])
 
-            #Sauvegarde
             nom_fichier = f"{nom_langue.lower()}_french.csv"
             chemin_sortie = pairs_dir / nom_fichier
             df_dialect.to_csv(chemin_sortie, index=False, encoding="utf-8-sig")
@@ -275,40 +285,32 @@ class SaraExtractor:
         return dialecte_dfs
 
     # ------------------------------------------------------------------
-    # Méthode principale
+    # Méthode principale de contrôle
     # ------------------------------------------------------------------
-
     def run(self):
         """
-        Exécute le pipeline complet :
-        1. Extraction depuis le PDF
-        2. Sauvegarde format large
-        3. Sauvegarde format long
-        4. Sauvegarde fichiers par dialecte
+        Exécute le pipeline complet.
         """
-        print("Extraction en cours...")
         self.lignes_brutes = self.extract()
-        print(f"  {len(self.lignes_brutes)} entrées extraites")
+        print(f"  {len(self.lignes_brutes)} entrées de dictionnaire extraites avec succès.")
 
         df_wide = self.to_wide()
         print(f"  Format large : {df_wide.shape[0]} termes × {df_wide.shape[1]} colonnes")
 
         df_long = self.to_long()
-        print(f"  Format long  : {len(df_long)} paires de traduction")
+        print(f"  Format long  : {len(df_long)} paires de traduction générées.")
 
         dialect_dfs = self.to_dialect_pairs()
-        print(f"  {len(dialect_dfs)} fichiers par dialecte générés")
+        print(f"  {len(dialect_dfs)} fichiers individuels par dialecte exportés.")
 
-        print("Terminé.")
 
 
 # ------------------------------------------------------------------
 # Point d'entrée
 # ------------------------------------------------------------------
-
 if __name__ == "__main__":
     extractor = SaraExtractor(
-        pdf_path="/home/broly/TextMining_BILAKE_Tchaa_Mèwè_Angelo/data/raw/SaraLanguagesLexicon.pdf",
-        output_dir="/home/broly/TextMining_BILAKE_Tchaa_Mèwè_Angelo/data/",
+        pdf_path="/home/broly/TextMining_BLK/data/raw/SaraLanguagesLexicon.pdf",
+        output_dir="/home/broly/TextMining_BLK/data/",
     )
     extractor.run()
