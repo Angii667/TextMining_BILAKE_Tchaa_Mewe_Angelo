@@ -1,10 +1,11 @@
 """
 Partie A — Extraction du lexique Sara depuis le PDF.
 
-Complétez chaque méthode de la classe SaraExtractor.
-Ne modifiez pas les signatures des méthodes ni les noms des fichiers de sortie.
+Ce script extrait les données du dictionnaire phonétique Sara sur la plage
+ciblée des pages 11 à 77, corrige les anomalies d'encodage identifiées par
+l'audit global des caractères, et génère les exports aux formats attendus.
 
-Bibliothèques suggérées : pdfplumber, pdfminer.six, pandas, re, pathlib
+Bibliothèques requises : pdfplumber, pandas
 """
 
 import re
@@ -35,7 +36,7 @@ SARA_LANGS = {
 class SaraExtractor:
     """
     Extrait les données du fichier SaraLanguagesLexicon.pdf et
-    produit trois formats de fichiers CSV.
+    produit trois formats de fichiers CSV nettoyés en UTF-8 Standard.
     """
 
     def __init__(self, pdf_path: str, output_dir: str = "data/"):
@@ -54,7 +55,7 @@ class SaraExtractor:
         self.lignes_brutes: list[dict] = []
 
     # ------------------------------------------------------------------
-    # Méthode de nettoyage globale validée par l'audit des 66 pages
+    # Méthode de nettoyage globale intégrant toutes les tactiques d'encodage
     # ------------------------------------------------------------------
     def clean_sara_text(self, text: str) -> str:
         """
@@ -70,56 +71,64 @@ class SaraExtractor:
         text = text.replace("nd¸g", "ndōg")
         text = text.replace("îl", "ɔ̀l")
 
-        # 2. Table de conversion exhaustive (mapping SIL Legacy vers Unicode)
+        # 2. Table de conversion exhaustive (basée sur l'audit complet du PDF)
         font_corrections = {
-            # --- VOYELLES OUVERTES ET CENTRALES SARA ---
-            "Æ": "ɛ",       # E ouvert (ex: kÆm -> kɛm)
-            "æ": "ɛ",       # E ouvert ou Schwa selon la variante dialectale
-            "Õ": "ɔ",       # O ouvert (ex: kÕ-ndû-g¸ -> kɔ̄-ndū-gə)
-            "õ": "ɔ",       # O ouvert (variante minuscule)
-            "‡": "ɨ",       # Voyelle centrale haute barrée (ex: k‡rª -> kɨ̄rā)
-            "¸": "ə",       # Schwa / Voyelle centrale moyenne (ex: màd¸ -> màdə)
+            # --- CONSONNES INJECTIVES ET SPÉCIALES ---
+            "ß": "ɓ",       # B injectif (Découvert lors de l'audit des 66 pages)
+            "÷": "ɗ",       # D injectif
+            "ð": "ɗ",       # Variante de D injectif / diacritique
+            "ñ": "ɲ",       # n palatal (gn)
+            "Ñ": "Ɲ",       # N palatal majuscule
+            "…": "ɲ",       # Autre encodage du n palatal
+            "È": "ṛ",       # r rétroflexe
+            "°": "ṛ",       # r rétroflexe
+            "®": "r̄",       # r avec macron (long)
+            "Ž": "č",       # c caron (tch)
 
-            # --- CONSONNES SPÉCIALES ET LIQUIDES ---
-            "£": "l",       # L standard ou liquide flappée (ex: yÆ£ -> yɛl)
-            "¥": "l",       # L ou R flappé selon le dialecte
-            "®": "r",       # R rétroflexe / battu (ex: gÆ® -> gɛr)
-            "÷": "ɽ",       # R battu / flappé spécifique (ex: ÷á -> ɽá)
-            "•": "r",       # Scorie d'accent ou R flappé (ex: bö• -> bōr)
+            # --- VOYELLES CONVERTIES DE LA POLICE HÉRITÉE ---
+            "û": "mo",      # Note: souvent mappé sur o long ou macron 'ō'
+            "ö": "ō",
+            "î": "ō",
+            "ä": "ā",
+            "æ": "ā",
+            "ü": "ū",
+            "ï": "ī",
+            "ë": "ē",
+            "‡": "í",
+            
+            # --- VOYELLES OUVERTES ET ACCENTS SPÉCIFIQUES ---
+            "Æ": "ɛ̀",      # Epsilon ouvert + accent grave
+            "£": "Ɛ",      # Epsilon ouvert majuscule
+            "Õ": "ɔ̀",      # O ouvert + accent grave
+            "ÿ": "ȳ",      # y avec macron
+            "ý": "ý",      # y avec accent aigu
+            "Û": "w̄",      # w avec macron
+            "Ç": "ó",      # o accent aigu
+            "ô": "ó",      # o accent aigu
+            "É": "é",      # e accent aigu (hors contexte Éy)
 
-            # --- CORRECTIONS DES PREMIÈRES PAGES ---
-            "5": "ɔ",       # Chiffre utilisé pour le O ouvert
-            "6": "ɓ",       # Chiffre utilisé pour l'implosive bilabiale
-            "3": "ɓ",       # Chiffre parfois substitué à l'implosive majuscule
-            "王": "ī",      # Idéogramme parasite, corruption de 'i' à ton moyen
-            "±": "ī",       # Signe plus/moins substitué pour un 'i' centralisé
-
-            # --- ACCENTS ET DIACRITIQUES DE TONS COMBINÉS ---
-            "ä": "ā",       # 'a' avec ton moyen (macron)
-            "ë": "ē",       # 'e' avec ton moyen
-            "ï": "ī",       # 'i' avec ton moyen ou haut
-            "ö": "ó",       # 'o' avec ton haut (ex: òö -> òó)
-            "ü": "ū",       # 'u' avec ton moyen ou haut
-            "û": "ú",       # 'u' avec ton haut (ex: ndû -> ndú)
-            "î": "í",       # 'i' avec ton haut ou descendant
-            "ô": "ó",       # 'o' avec ton haut
-            "ª": "á",       # Exposant 'a' traduisant un ton haut
-            "º": "ɔ́",       # Degré traduisant un O ouvert avec ton haut
-            "Ç": "ɔ́",       # C cédille traduisant un O ouvert majuscule ou accentué
-
-            # --- NETTOYAGE DES SCORIES DE PARSING ---
-            " :": "",       # Suppression des deux-points parasites en fin de mot
+            # --- VOYELLES NASALISÉES (TILDE / CROCHET SOUSCRIT) ---
+            "¡": "ı̰",      # i sans point avec tilde souscrit
+            "Ð": "ɛ̰̀",     # epsilon ouvert grave avec tilde souscrit
+            "¼": "à̰",      # a grave avec tilde souscrit
+            "Ÿ": "ḛ̀",      # e grave avec tilde souscrit
+            "Ï": "ḛ́",      # e aigu avec tilde souscrit
+            
+            # --- NETTOYAGE DES SCORIES DE RENDU ---
+            "¸": "",       # Suppression du résidu de cédille déplacée
+            " ¸": "",
         }
-
+        
         for legacy_char, unicode_char in font_corrections.items():
             text = text.replace(legacy_char, unicode_char)
-
-        # 3. Nettoyage final des espaces et ponctuations parasites
+            
+        # 3. Nettoyage final des espaces et ponctuations parasites de fin de ligne
+        text = text.rstrip(" :")
         text = re.sub(r'\s+', ' ', text).strip()
         return text
 
     # ------------------------------------------------------------------
-    # Méthode 1 : lecture du PDF (Ciblée sur les pages 11 à 77)
+    # Méthode 1 : lecture du PDF (Ciblée strictement sur les pages 11 à 77)
     # ------------------------------------------------------------------
     def extract(self) -> list[dict]:
         """
@@ -129,7 +138,7 @@ class SaraExtractor:
         lignes_brutes = []
         entree_courante = None
 
-        # Pattern pour détecter les lignes de traduction
+        # Pattern pour détecter les lignes de traduction (ex: Mb=...)
         lang_regex = r'\b(' + '|'.join(SARA_LANGS.keys()) + r')\s*=\s*'
 
         if not self.pdf_path.exists():
@@ -139,13 +148,13 @@ class SaraExtractor:
             # Sécurisation du slice : de la page 11 (index 10) à la page 77 (index 76 inclus)
             pages_du_dictionnaire = pdf.pages[10:77]
             
-            print(f"  [Analyse] Extraction ciblée sur {len(pages_du_dictionnaire)} pages (Pages 11 à 77).")
+            print(f"Extraction ciblée en cours sur les pages 11 à 77 du document.")
 
             for page in pages_du_dictionnaire:
                 width = page.width
                 height = page.height
 
-                # Séparation en deux colonnes strictes
+                # Séparation géométrique en deux colonnes indépendantes
                 domaine_gauche = (0, 0, width/2, height)
                 domaine_droite = (width/2, 0, width, height)
 
@@ -162,11 +171,11 @@ class SaraExtractor:
                         if not ligne:
                             continue
 
-                        # Ignorer les en-têtes et numéros de pages
+                        # Ignorer les métadonnées de page
                         if ligne.isdigit() or ligne.lower().startswith("sara languages lexicon"):
                             continue
 
-                        # Détection des tags dialectes
+                        # Détection des tags de dialectes dans la ligne
                         contient_lang = any(f'{lang}=' in ligne for lang in SARA_LANGS)
 
                         if contient_lang:
@@ -179,22 +188,24 @@ class SaraExtractor:
 
                                     mot = ligne[start_idx:end_idx].strip()
                                     if mot:
+                                        # Application de la correction d'encodage
                                         mot = self.clean_sara_text(mot)
                                         if mot:
                                             entree_courante[lang_code] = mot
                         else:
-                            # Nouvelle entrée (Terme en Français)
+                            # Nouvelle entrée (Terme pivot en Français)
                             if entree_courante is not None and len(entree_courante) > 1:
                                 lignes_brutes.append(entree_courante)
                             entree_courante = {"french_term": ligne}
                     
+            # Enregistrement de la dernière entrée du dictionnaire
             if entree_courante is not None and len(entree_courante) > 1:
                 lignes_brutes.append(entree_courante)
         
         return lignes_brutes
 
     # ------------------------------------------------------------------
-    # Méthode 2 : format large
+    # Méthode 2 : Transformation au format LARGE
     # ------------------------------------------------------------------
     def to_wide(self) -> pd.DataFrame:
         """
@@ -206,6 +217,7 @@ class SaraExtractor:
         
         df_wide = pd.DataFrame(self.lignes_brutes)
 
+        # S'assurer que toutes les colonnes de dialectes existent
         for langue in SARA_LANGS.keys():
             if langue not in df_wide.columns:
                 df_wide[langue] = None
@@ -219,7 +231,7 @@ class SaraExtractor:
         return df_wide
 
     # ------------------------------------------------------------------
-    # Méthode 3 : format long
+    # Méthode 3 : Transformation au format LONG
     # ------------------------------------------------------------------
     def to_long(self) -> pd.DataFrame:
         """
@@ -250,7 +262,7 @@ class SaraExtractor:
         return df_long
 
     # ------------------------------------------------------------------
-    # Méthode 4 : fichiers individuels par dialecte
+    # Méthode 4 : Génération des fichiers individuels par dialecte
     # ------------------------------------------------------------------
     def to_dialect_pairs(self) -> dict[str, pd.DataFrame]:
         """
@@ -285,28 +297,29 @@ class SaraExtractor:
         return dialecte_dfs
 
     # ------------------------------------------------------------------
-    # Méthode principale de contrôle
+    # Méthode principale d'orchestration
     # ------------------------------------------------------------------
     def run(self):
         """
-        Exécute le pipeline complet.
+        Exécute l'intégralité du pipeline
         """
+        print("=== DEBUT DE L'EXTRACTION DU LEXIQUE SARA ===")
         self.lignes_brutes = self.extract()
-        print(f"  {len(self.lignes_brutes)} entrées de dictionnaire extraites avec succès.")
+        print(f"  [Succès] {len(self.lignes_brutes)} entrées du dictionnaire chargées.")
 
         df_wide = self.to_wide()
-        print(f"  Format large : {df_wide.shape[0]} termes × {df_wide.shape[1]} colonnes")
+        print(f"  [Export] Format large généré : {df_wide.shape[0]} termes.")
 
         df_long = self.to_long()
-        print(f"  Format long  : {len(df_long)} paires de traduction générées.")
+        print(f"  [Export] Format long généré : {len(df_long)} paires associées.")
 
         dialect_dfs = self.to_dialect_pairs()
-        print(f"  {len(dialect_dfs)} fichiers individuels par dialecte exportés.")
-
+        print(f"  [Export] {len(dialect_dfs)} fichiers par dialecte créés dans 'data/pairs/'.")
+        print("=== PIPELINE TERMINE AVEC SUCCÈS ===")
 
 
 # ------------------------------------------------------------------
-# Point d'entrée
+# Point d'entrée d'exécution du script
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     extractor = SaraExtractor(
