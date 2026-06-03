@@ -1,7 +1,16 @@
 """
 Partie B — Exploration statistique du lexique Sara.
 
-Bibliothèques : pandas, matplotlib, seaborn, wordcloud
+Ce module analyse le lexique multilingue Sara (14 dialectes tchadiens + français).
+Il utilise le format large (sara_wide.csv) comme source principale pour les stats
+et le format long (sara_long.csv) pour les agrégations par dialecte.
+
+Produit 5 graphiques dans figures/ :
+  - paires_par_dialecte.png   : barres horizontales du nombre de paires par dialecte
+  - heatmap_couverture.png    : matrice binaire de présence des termes par dialecte
+  - longueur_mots_boxplot.png : distribution des longueurs de mots
+  - wordcloud_Mb.png          : nuage de mots Mbay
+  - wordcloud_Ngb.png         : nuage de mots Ngambay
 """
 
 from collections import Counter
@@ -15,9 +24,14 @@ import seaborn as sns
 class SaraExplorer:
     """
     Analyse statistique et visualisation du lexique multilingue Sara.
-    Utilise le format large (sara_wide.csv) comme source principale.
+
+    Fonctionnalités :
+      - B1. Statistiques de base (termes, paires, couverture)
+      - B2. Analyse du vocabulaire (fréquence, longueur des mots)
+      - B3. Visualisations (barres, heatmap, boîtes, nuages de mots)
     """
 
+    # Dictionnaire de correspondance : code dialecte → nom complet
     LANG_NAMES = {
         "Beb": "Bebote",   "Bd": "Bediondo", "Db": "Daba",
         "Gor": "Gor",      "Gu": "Gulay",    "KbN": "Kaba_Na",
@@ -27,10 +41,20 @@ class SaraExplorer:
     }
 
     def __init__(self, wide_csv: str, long_csv: str, figures_dir: str = "figures/"):
+        """
+        Initialise l'explorateur avec les deux fichiers CSV.
+
+        Args:
+            wide_csv    : Chemin vers sara_wide.csv (1 ligne = 1 terme français,
+                         1 colonne par dialecte)
+            long_csv    : Chemin vers sara_long.csv (1 ligne = 1 paire de traduction)
+            figures_dir : Dossier de sauvegarde des graphiques
+        """
         self.df_wide = pd.read_csv(wide_csv, encoding="utf-8-sig")
         self.df_long = pd.read_csv(long_csv, encoding="utf-8-sig")
         self.figures_dir = Path(figures_dir)
         self.figures_dir.mkdir(parents=True, exist_ok=True)
+        # Liste des colonnes correspondant aux dialectes (tout sauf french_term)
         self.lang_cols = [c for c in self.df_wide.columns if c != "french_term"]
 
     # ------------------------------------------------------------------
@@ -38,6 +62,17 @@ class SaraExplorer:
     # ------------------------------------------------------------------
 
     def basic_stats(self) -> dict:
+        """
+        B1 — Calcule et affiche les statistiques descriptives de base.
+
+        - Nombre de termes français uniques
+        - Nombre total de paires de traduction
+        - Répartition des paires par dialecte
+        - Taux de couverture (pourcentage de termes traduits) par dialecte
+
+        Returns:
+            Dictionnaire contenant n_terms, n_pairs, pairs_per_dialect, coverage
+        """
         n_terms = self.df_wide["french_term"].nunique()
         n_pairs = len(self.df_long)
         pairs_per_dialect = self.df_long["target_lang"].value_counts()
@@ -68,6 +103,16 @@ class SaraExplorer:
     # ------------------------------------------------------------------
 
     def coverage_analysis(self) -> pd.DataFrame:
+        """
+        B2 — Analyse la couverture des termes à travers les dialectes.
+
+        - Top 20 des termes présents dans le plus de dialectes
+        - Bottom 20 des termes les moins représentés
+        - Termes présents dans TOUS les dialectes
+
+        Returns:
+            DataFrame avec pour chaque terme son nombre de dialectes couverts
+        """
         df = self.df_wide.set_index("french_term")
         nb_dialectes = df.notna() & (df != "")
         nb_dialectes = nb_dialectes.sum(axis=1).reset_index()
@@ -91,6 +136,15 @@ class SaraExplorer:
         return nb_dialectes
 
     def word_length_stats(self) -> pd.DataFrame:
+        """
+        B2 — Statistiques descriptives de la longueur des mots par dialecte.
+
+        Calcule pour chaque dialecte (et le français) :
+          - moyenne, médiane, min, max, écart-type de la longueur des mots
+
+        Returns:
+            DataFrame contenant les stats par dialecte
+        """
         rows = []
         for code, name in self.LANG_NAMES.items():
             mots = self.df_wide[code].dropna()
@@ -105,7 +159,7 @@ class SaraExplorer:
                     "max": lengths.max(),
                     "ecart_type": round(lengths.std(), 2),
                 })
-        # Français
+        # Statistiques pour le français
         fr_lengths = self.df_wide["french_term"].astype(str).str.len()
         rows.append({
             "dialecte": "Français",
@@ -124,6 +178,11 @@ class SaraExplorer:
     # ------------------------------------------------------------------
 
     def plot_pairs_per_dialect(self):
+        """
+        B3 — Graphique 1 : Barres horizontales du nombre de paires par dialecte.
+
+        Sauvegarde : figures/paires_par_dialecte.png
+        """
         counts = self.df_long["target_lang"].value_counts().sort_values(ascending=True)
         fig, ax = plt.subplots(figsize=(10, 6))
         counts.plot(kind="barh", ax=ax, color="steelblue", edgecolor="black")
@@ -137,6 +196,17 @@ class SaraExplorer:
         plt.close()
 
     def plot_coverage_heatmap(self, sample_size: int = 100):
+        """
+        B3 — Graphique 2 : Heatmap binaire de couverture terme × dialecte.
+
+        Affiche une matrice où chaque cellule vaut 1 (traduit) ou 0 (absent).
+        Seuls les 100 premiers termes sont échantillonnés pour la lisibilité.
+
+        Sauvegarde : figures/heatmap_couverture.png
+
+        Args:
+            sample_size : Nombre de termes à échantillonner (défaut: 100)
+        """
         df = self.df_wide.set_index("french_term")
         binary = df.notna() & (df != "")
         binary = binary.astype(int)
@@ -151,6 +221,16 @@ class SaraExplorer:
         plt.close()
 
     def plot_word_length_boxplot(self, dialects: list[str] = None):
+        """
+        B3 — Graphique 3 : Boxplot de la longueur des mots par dialecte.
+
+        Compare les 5 premiers dialectes + le français.
+
+        Sauvegarde : figures/longueur_mots_boxplot.png
+
+        Args:
+            dialects : Liste des codes dialectes à inclure (défaut: 5 premiers)
+        """
         if dialects is None:
             dialects = list(self.LANG_NAMES.keys())[:5]
         data = []
@@ -177,6 +257,16 @@ class SaraExplorer:
         plt.close()
 
     def plot_wordcloud(self, dialect_code: str):
+        """
+        B3 — Graphique 4/5 : Nuage de mots pour un dialecte donné.
+
+        Les mots les plus fréquents apparaissent en plus gros.
+
+        Sauvegarde : figures/wordcloud_{dialect_code}.png
+
+        Args:
+            dialect_code : Code du dialecte (ex: "Mb" pour Mbay)
+        """
         try:
             from wordcloud import WordCloud
         except ImportError:
@@ -202,6 +292,10 @@ class SaraExplorer:
     # ------------------------------------------------------------------
 
     def run(self):
+        """
+        Exécute le pipeline complet d'exploration :
+          B1 → B2 → B3 (5 graphiques)
+        """
         print("=== B1. Statistiques de base ===")
         self.basic_stats()
 
@@ -216,6 +310,7 @@ class SaraExplorer:
         self.plot_coverage_heatmap()
         self.plot_word_length_boxplot()
 
+        # Nuages de mots pour deux dialectes représentatifs
         self.plot_wordcloud("Mb")
         self.plot_wordcloud("Ngb")
 
