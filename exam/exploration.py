@@ -52,14 +52,18 @@ class SaraExplorer:
     def basic_stats(self) -> dict:
         """
         Calcule et affiche les statistiques fondamentales :
-        - Nombre de termes français uniques
-        - Nombre total de paires de traduction
         - Nombre de paires par dialecte
         - Taux de couverture par dialecte (% de termes traduits)
 
         Returns:
             Dictionnaire avec les métriques calculées.
         """
+        # Nombre de termes français uniques
+        nbre_fr_uniq = self.df_wide["french_term"].nunique()
+        # Nombre total de paires de traduction
+        pairs_par_traduction = len(self.df_long)
+        # Nombre de paires par dialectes
+        nbre_pairs_par_dialecte =  self.df_wide[self.lang_cols].notna().sum()
         raise NotImplementedError("À implémenter")
 
     # ------------------------------------------------------------------
