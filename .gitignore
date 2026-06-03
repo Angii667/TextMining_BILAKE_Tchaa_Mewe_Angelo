@@ -1,6 +1,7 @@
 # Environnement virtuel
 .venv/
 .examen_finale/
+mon_env/
 __pycache__/
 *.pyc
 *.pyo
