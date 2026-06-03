@@ -1,5 +1,6 @@
 # Environnement virtuel
 .venv/
+.examen_finale/
 __pycache__/
 *.pyc
 *.pyo
@@ -7,17 +8,9 @@ __pycache__/
 # Données générées (à ne pas publier)
 data/processed/
 figures/
-
-# Autres PDFs (non fournis aux étudiants)
-data/raw/Gor.pdf
-data/raw/KabaNa.pdf
-data/raw/SHU_Lexique_arabe_francais_11e_2021.pdf
-
-# Scripts de correction (non fournis aux étudiants)
-scripts/
+data/raw/
 
 # Fichiers temporaires
-*.txt
 *.log
 .DS_Store
 Thumbs.db

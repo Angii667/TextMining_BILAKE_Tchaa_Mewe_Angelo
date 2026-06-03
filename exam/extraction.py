@@ -356,7 +356,7 @@ class SaraExtractor:
         print(f"{len(dialect_dfs)} fichiers individuels par dialecte.")
 
         print("=" * 60)
-        print("  PIPELINE TERMINÉ AVEC SUCCÈS")
+        print("PIPELINE TERMINÉ AVEC SUCCÈS")
         print("=" * 60)
 
 
