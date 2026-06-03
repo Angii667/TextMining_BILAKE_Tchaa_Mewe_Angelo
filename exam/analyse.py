@@ -15,10 +15,12 @@ import re
 import string
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
 from sklearn.cluster import AgglomerativeClustering, KMeans
 from sklearn.decomposition import LatentDirichletAllocation, PCA
 from sklearn.ensemble import RandomForestClassifier
@@ -28,7 +30,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.manifold import TSNE
 from sklearn.metrics import (ConfusionMatrixDisplay, classification_report,
                              silhouette_score)
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import (GridSearchCV, train_test_split)
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import Pipeline
 from sklearn.svm import LinearSVC
@@ -271,7 +273,7 @@ class TopicModeler:
         lda.fit(self.count_matrix)
         return lda
 
-    def select_best_k(self, k_values: list[int] = [5, 10, 15, 20]) -> int:
+    def select_best_k(self, k_values: list[int]) -> int:
         """
         Évalue LDA pour différentes valeurs de k et sélectionne l'optimum.
 
@@ -311,6 +313,66 @@ class TopicModeler:
         plt.savefig(FIGURES_DIR / "lda_perplexite.png", dpi=150)
         plt.close()
         return best_k
+
+    def evaluate_coherence(self, k_values: list[int]) -> list[float]:
+        """
+        Évalue la cohérence (c_v) des thèmes pour chaque k avec gensim.
+
+        La cohérence mesure la similarité sémantique entre les mots
+        d'un thème — plus le score est élevé, plus le thème est interprétable.
+
+        Sauvegarde : figures/partie_c/lda_coherence.png
+
+        Args:
+            k_values : Liste des valeurs de k à évaluer
+
+        Returns:
+            Liste des scores de cohérence (None si gensim absent)
+        """
+        try:
+            import gensim
+            from gensim.corpora import Dictionary
+            from gensim.models import CoherenceModel
+        except ImportError:
+            print("  gensim non installé. Saute l'évaluation de cohérence.")
+            return None
+
+        # Sous-échantillon pour accélérer le calcul de cohérence
+        sample_size = min(5000, len(self.preprocessor.texts))
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(self.preprocessor.texts), sample_size, replace=False)
+        texts_sample = [self.preprocessor.texts[i] for i in idx]
+        tokenized = [t.split() for t in texts_sample]
+        dictionary = Dictionary(tokenized)
+        corpus_bow = [dictionary.doc2bow(t) for t in tokenized]
+
+        scores = []
+        for k in k_values:
+            model = gensim.models.LdaModel(
+                corpus=corpus_bow, id2word=dictionary,
+                num_topics=k, random_state=42, passes=5,
+            )
+            cm = CoherenceModel(
+                model=model, texts=tokenized,
+                dictionary=dictionary, coherence="c_v",
+            )
+            score = cm.get_coherence()
+            scores.append(score)
+            print(f"  k={k:2d}  coherence_cv={score:.4f}")
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(k_values, scores, marker="o", color="coral")
+        ax.set_xlabel("Nombre de themes (k)")
+        ax.set_ylabel("Score de coherence (c_v)")
+        ax.set_title("Score de coherence LDA (c_v)")
+        best_k = k_values[np.argmax(scores)]
+        ax.scatter([best_k], [max(scores)], color="red", s=100, zorder=5,
+                   label=f"k optimal = {best_k}")
+        ax.legend()
+        plt.tight_layout()
+        plt.savefig(FIGURES_DIR / "lda_coherence.png", dpi=150)
+        plt.close()
+        return scores
 
     def display_topics(self, n_words: int = 12):
         """
@@ -373,11 +435,13 @@ class TopicModeler:
     def run(self):
         """
         Lance le pipeline Topic Modeling complet :
-          sélection de k → affichage des thèmes → assignment → visualisation
+          perplexité + cohérence → meilleur k → thèmes → assignment
         """
         print("\n=== C2. Topic Modeling ===")
-        self.best_k = self.select_best_k()
-        print(f"  Meilleur k : {self.best_k}")
+        k_values = [5, 10, 15, 20]
+        self.best_k = self.select_best_k(k_values)
+        self.evaluate_coherence(k_values)
+        print(f"  Meilleur k (perplexite) : {self.best_k}")
         print("  Themes :")
         self.display_topics()
         df = self.assign_topics()
@@ -392,6 +456,9 @@ class TextClassifier:
       - Régression Logistique (LogisticRegression)
       - SVM Linéaire (LinearSVC)
       - Random Forest (RandomForestClassifier)
+
+    La vectorisation TF-IDF est faite une fois pour toutes en amont
+    afin d'éviter de la recalculer dans chaque fold du GridSearchCV.
     """
 
     def __init__(self, preprocessor: TextPreprocessor):
@@ -401,104 +468,122 @@ class TextClassifier:
         """
         self.preprocessor = preprocessor
         self.results = {}
+        self.vectorizer = TfidfVectorizer(
+            max_features=8000, min_df=2, max_df=0.90,
+            ngram_range=(1, 2), sublinear_tf=True,
+        )
 
     def split_data(self, test_size: float = 0.2, random_state: int = 42):
         """
         Divise les données en train/test avec stratification.
+        Vectorise les textes une seule fois.
 
         Args:
             test_size    : Proportion réservée au test (défaut: 20%)
             random_state : Graine aléatoire pour la reproductibilité
 
         Returns:
-            (X_train, X_test, y_train, y_test)
+            (X_train_vec, X_test_vec, y_train, y_test)
         """
         X = self.preprocessor.texts
         y = self.preprocessor.labels
-        return train_test_split(
+        X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=test_size, random_state=random_state, stratify=y
         )
+        X_train_vec = self.vectorizer.fit_transform(X_train)
+        X_test_vec = self.vectorizer.transform(X_test)
+        return X_train_vec, X_test_vec, y_train, y_test
+
+    def _grid_search(self, clf, param_grid: dict, X_train, y_train,
+                     name: str):
+        """
+        Applique GridSearchCV sur le classifieur uniquement
+        (données déjà vectorisées = beaucoup plus rapide).
+
+        Args:
+            clf        : Estimateur sklearn non entraîné
+            param_grid : Grille d'hyperparamètres
+            X_train    : Matrice TF-IDF d'entraînement
+            y_train    : Étiquettes d'entraînement
+            name       : Nom du modèle (pour affichage)
+
+        Returns:
+            Meilleur estimateur trouvé
+        """
+        grid = GridSearchCV(
+            clf, param_grid, cv=3, scoring="f1_macro",
+            n_jobs=2, verbose=0,
+        )
+        grid.fit(X_train, y_train)
+        print(f"    Meilleurs params {name} : {grid.best_params_}")
+        return grid.best_estimator_
 
     def train_naive_bayes(self, X_train, y_train):
         """
-        Entraîne un classifieur Naive Bayes multinomial.
+        Entraîne un Naive Bayes avec GridSearch sur alpha.
 
-        Pipeline : TF-IDF (unigrammes + bigrammes) → MultinomialNB
+        Grille : alpha ∈ [0.01, 0.1, 0.5, 1.0, 2.0]
 
         Returns:
-            Pipeline entraîné
+            Meilleur classifieur MultinomialNB trouvé
         """
-        pipeline = Pipeline([
-            ("tfidf", TfidfVectorizer(
-                max_features=8000, min_df=2, max_df=0.90,
-                ngram_range=(1, 2), sublinear_tf=True
-            )),
-            ("clf", MultinomialNB(alpha=0.1)),
-        ])
-        pipeline.fit(X_train, y_train)
-        return pipeline
+        return self._grid_search(
+            MultinomialNB(),
+            {"alpha": [0.01, 0.1, 0.5, 1.0, 2.0]},
+            X_train, y_train, "NB",
+        )
 
     def train_logistic_regression(self, X_train, y_train):
         """
-        Entraîne une régression logistique multinomiale.
+        Entraîne une régression logistique avec GridSearch sur C et solver.
 
-        Pipeline : TF-IDF → LogisticRegression (solver lbfgs)
+        Grille : C ∈ [0.1, 1.0, 10.0], solver ∈ [lbfgs, saga]
 
         Returns:
-            Pipeline entraîné
+            Meilleur classifieur LogisticRegression trouvé
         """
-        pipeline = Pipeline([
-            ("tfidf", TfidfVectorizer(
-                max_features=8000, min_df=2, max_df=0.90,
-                ngram_range=(1, 2), sublinear_tf=True
-            )),
-            ("clf", LogisticRegression(
-                C=1.0, max_iter=2000, random_state=42, solver="lbfgs",
-            )),
-        ])
-        pipeline.fit(X_train, y_train)
-        return pipeline
+        return self._grid_search(
+            LogisticRegression(max_iter=2000, random_state=42),
+            {"C": [0.1, 1.0, 10.0], "solver": ["lbfgs", "saga"]},
+            X_train, y_train, "LR",
+        )
 
     def train_svm(self, X_train, y_train):
         """
-        Entraîne un SVM linéaire.
+        Entraîne un SVM linéaire avec GridSearch sur C.
 
-        Pipeline : TF-IDF → LinearSVC
+        Grille : C ∈ [0.1, 1.0, 10.0]
 
         Returns:
-            Pipeline entraîné
+            Meilleur classifieur LinearSVC trouvé
         """
-        pipeline = Pipeline([
-            ("tfidf", TfidfVectorizer(
-                max_features=8000, min_df=2, max_df=0.90,
-                ngram_range=(1, 2), sublinear_tf=True
-            )),
-            ("clf", LinearSVC(C=1.0, random_state=42, max_iter=3000)),
-        ])
-        pipeline.fit(X_train, y_train)
-        return pipeline
+        return self._grid_search(
+            LinearSVC(random_state=42, max_iter=5000),
+            {"C": [0.1, 1.0, 10.0]},
+            X_train, y_train, "SVM",
+        )
 
     def train_random_forest(self, X_train, y_train):
         """
-        Entraîne une forêt aléatoire.
+        Entraîne une forêt aléatoire avec GridSearch sur
+        n_estimators, max_depth et min_samples_leaf.
 
-        Pipeline : TF-IDF → RandomForest (200 arbres, profondeur max 50)
+        Grille : n_estimators ∈ [100, 200, 300],
+                 max_depth ∈ [30, 100, None],
+                 min_samples_leaf ∈ [1, 2, 5]
 
         Returns:
-            Pipeline entraîné
+            Meilleur classifieur RandomForestClassifier trouvé
         """
-        pipeline = Pipeline([
-            ("tfidf", TfidfVectorizer(
-                max_features=8000, min_df=2, max_df=0.90,
-                ngram_range=(1, 2), sublinear_tf=True
-            )),
-            ("clf", RandomForestClassifier(
-                n_estimators=200, max_depth=50, random_state=42,
-                n_jobs=-1, min_samples_leaf=2
-            )),
-        ])
-        pipeline.fit(X_train, y_train)
-        return pipeline
+        return self._grid_search(
+            RandomForestClassifier(random_state=42, n_jobs=-1),
+            {
+                "n_estimators": [100, 200, 300],
+                "max_depth": [30, 100, None],
+                "min_samples_leaf": [1, 2, 5],
+            },
+            X_train, y_train, "RF",
+        )
 
     def evaluate(self, model, X_test, y_test, model_name: str):
         """
@@ -580,11 +665,11 @@ class TextClassifier:
     def run(self):
         """
         Lance le pipeline Classification complet :
-          split → entraîne 4 modèles → évalue → compare
+          split + vectorisation → GridSearch sur 4 modèles → évaluation → comparaison
         """
         print("\n=== C3. Classification supervisee ===")
-        X_train, X_test, y_train, y_test = self.split_data()
-        print(f"  Train : {len(X_train)} docs  Test : {len(X_test)} docs")
+        Xtv, Xts, y_train, y_test = self.split_data()
+        print(f"  Train : {Xtv.shape[0]} docs  Test : {Xts.shape[0]} docs")
 
         for name, trainer in [
             ("Naive Bayes",             self.train_naive_bayes),
@@ -593,8 +678,8 @@ class TextClassifier:
             ("Random Forest",           self.train_random_forest),
         ]:
             print(f"\n  Entrainement : {name}")
-            model = trainer(X_train, y_train)
-            self.evaluate(model, X_test, y_test, model_name=name)
+            model = trainer(Xtv, y_train)
+            self.evaluate(model, Xts, y_test, model_name=name)
 
         self.compare_models()
 
