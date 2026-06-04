@@ -8,8 +8,9 @@ __pycache__/
 
 # Données générées (à ne pas publier)
 data/processed/
-figures/
-data/raw/
+
+# Compilateur LaTeX local
+tectonic
 
 # Fichiers temporaires
 *.log

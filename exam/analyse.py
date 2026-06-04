@@ -22,7 +22,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.cluster import AgglomerativeClustering, KMeans
-from sklearn.decomposition import LatentDirichletAllocation, PCA
+from sklearn.decomposition import LatentDirichletAllocation
+import umap
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_extraction.text import (CountVectorizer,
                                              TfidfVectorizer)
@@ -820,12 +821,12 @@ class TextClusterer:
         plt.close()
         return labels
 
-    def reduce_dimensions(self, method: str = "pca") -> np.ndarray:
+    def reduce_dimensions(self, method: str = "umap") -> np.ndarray:
         """
         Réduit la matrice TF-IDF en 2 dimensions pour visualisation.
 
         Args:
-            method : "pca" (rapide, linéaire) ou "tsne" (précis, lent)
+            method : "umap" (recommandé) ou "tsne" (alternatif lent)
 
         Returns:
             Coordonnées 2D des documents (n_docs, 2)
@@ -834,10 +835,11 @@ class TextClusterer:
         if method == "tsne":
             reducer = TSNE(n_components=2, random_state=42, perplexity=30)
         else:
-            reducer = PCA(n_components=2, random_state=42)
+            reducer = umap.UMAP(n_components=2, random_state=42, n_neighbors=30,
+                                min_dist=0.1, metric="cosine")
         return reducer.fit_transform(self.tfidf_matrix.toarray())
 
-    def plot_clusters_2d(self, labels: np.ndarray, method: str = "pca",
+    def plot_clusters_2d(self, labels: np.ndarray, method: str = "umap",
                          title: str = ""):
         """
         Visualise les clusters en 2D après réduction de dimension.
@@ -846,7 +848,7 @@ class TextClusterer:
 
         Args:
             labels : Étiquettes de cluster pour chaque document
-            method : Méthode de réduction ("pca" ou "tsne")
+            method : Méthode de réduction ("umap" ou "tsne")
             title  : Titre du graphique
         """
         coords = self.reduce_dimensions(method)
@@ -859,6 +861,30 @@ class TextClusterer:
         plt.colorbar(scatter, ax=ax, label="Cluster")
         plt.tight_layout()
         plt.savefig(FIGURES_DIR / f"clusters_2d_{method}.png", dpi=150)
+        plt.close()
+
+    def plot_true_labels(self, method: str = "umap"):
+        """
+        Visualise les vrais labels en 2D via UMAP pour validation croisée.
+
+        Sauvegarde : figures/partie_c/true_labels_{method}.png
+        """
+        coords = self.reduce_dimensions(method)
+        fig, ax = plt.subplots(figsize=(10, 7))
+        classes = {"digestif": 0, "cardiovasculaire": 1, "tumeurs": 2,
+                   "nerveux": 3, "general": 4}
+        colors = [classes.get(d.get("classe", ""), 4)
+                  for d in self.preprocessor.documents]
+        scatter = ax.scatter(coords[:, 0], coords[:, 1], c=colors,
+                             cmap="tab10", alpha=0.6, s=10)
+        ax.set_title(f"Vrais labels ({method.upper()})")
+        ax.set_xlabel(f"{method.upper()} 1")
+        ax.set_ylabel(f"{method.upper()} 2")
+        cbar = plt.colorbar(scatter, ax=ax, label="Classe")
+        cbar.set_ticks(range(5))
+        cbar.set_ticklabels(list(classes.keys()))
+        plt.tight_layout()
+        plt.savefig(FIGURES_DIR / f"true_labels_{method}.png", dpi=150)
         plt.close()
 
     def cluster_top_words(self, labels: np.ndarray, n_words: int = 10):
@@ -896,13 +922,16 @@ class TextClusterer:
 
         print("  K-Means...")
         km_labels = self.kmeans_clustering(optimal_k)
-        self.plot_clusters_2d(km_labels, method="pca",
-                              title="K-Means (PCA)")
+        self.plot_clusters_2d(km_labels, method="umap",
+                              title="K-Means (UMAP)")
 
         print("  Clustering hierarchique...")
         hc_labels = self.hierarchical_clustering(optimal_k)
-        self.plot_clusters_2d(hc_labels, method="pca",
-                              title="Hierarchique (PCA)")
+        self.plot_clusters_2d(hc_labels, method="umap",
+                              title="Hierarchique (UMAP)")
+
+        print("  Vrais labels (validation)...")
+        self.plot_true_labels(method="umap")
 
         print("  Mots representatifs par cluster :")
         self.cluster_top_words(km_labels)
