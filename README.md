@@ -1,22 +1,29 @@
-# Text Mining — Lexique Sara & Analyse de Textes Médicaux
+# Text Mining Multilingue et Analyse de Textes Médicaux
+
+Projet de **fouille de textes** divisé en trois parties complémentaires : extraction d'un lexique multilingue Sara depuis un PDF hérité, exploration statistique d'un corpus de 14 dialectes, et pipeline NLP complet sur un corpus médical PubMed.
 
 ## Structure du projet
 
 ```
-TextMining_BLK/
-├── README.md
-├── requirements.txt
-├── SUJET_EXAMEN.md
+TextMining_BILAKE_Tchaa_Mewe_Angelo/
+├── rapport_TextMining.pdf       # Rapport final (15 pages)
+├── rapport_TextMining.tex       # Sources LaTeX du rapport
+├── requirements.txt             # Dépendances Python
 ├── exam/
-│   ├── extraction.py     # Partie A — Extraction du lexique Sara depuis le PDF
-│   ├── exploration.py    # Partie B — Exploration statistique du lexique Sara
-│   └── analyse.py        # Partie C — Analyse avancée (dataset Medical Text)
+│   ├── extraction.py            # Partie A — OCR Tesseract (pipeline principal)
+│   ├── extraction_gemini.py     # Partie A — Variante API Gemini 2.5 Flash
+│   ├── exploration.py           # Partie B — Exploration statistique
+│   └── analyse.py               # Partie C — NLP médical (LDA, classif., clustering)
 ├── data/
-│   ├── raw/              # PDF source (non publié)
-│   ├── sara_wide.csv     # Format large : 1 ligne/terme français, 1 colonne/dialecte
-│   ├── sara_long.csv     # Format long : 1 ligne/paire de traduction
-│   ├── pairs/            # 14 fichiers CSV (1 par dialecte)
-│   └── medical_text.csv  # Dataset Medical Text (étiquettes 1-5)
+│   ├── raw/SaraLanguagesLexicon.pdf   # Dictionnaire Sara-Français source
+│   ├── sara_wide.csv                 # 1104 termes français × 14 dialectes
+│   ├── sara_long.csv                 # 10 600 paires de traduction
+│   ├── pairs/                        # 14 fichiers bilingues individuels
+│   ├── train.dat                     # Corpus médical (entraînement)
+│   └── test.dat                      # Corpus médical (test)
+├── images/
+│   ├── armoirie.jpg                  # Armoiries du Togo
+│   └── logo_ecole.jpeg               # Logo EPL
 └── figures/
     ├── paires_par_dialecte.png
     ├── heatmap_couverture.png
@@ -24,15 +31,18 @@ TextMining_BLK/
     ├── wordcloud_Mb.png
     ├── wordcloud_Ngb.png
     └── partie_c/
-        ├── lda_perplexite.png
-        ├── lda_distribution_themes.png
-        ├── confusion_*.png
+        ├── lda_coherence.png
+        ├── clusters_2d_umap.png
         ├── comparaison_classifieurs.png
-        ├── kmeans_coude.png
-        ├── kmeans_silhouette.png
         ├── dendrogramme.png
-        └── clusters_2d_pca.png
+        └── confusion_*.png
 ```
+
+## Problème
+
+Le **SaraLanguagesLexicon.pdf** utilise des polices héritées dont les tables Unicode (ToUnicode CMap) sont absentes ou corrompues. Toute extraction native (pdfplumber, PyMuPDF, pdfminer) produit du texte corrompu pour les caractères de l'Alphabet National Tchadien (ɓ, ɗ, ɛ, ɔ, ɨ, ə, etc.).
+
+**Solution adoptée :** pipeline OCR complet — conversion PDF → image (300 DPI) → Tesseract LSTM → parsing post-OCR. Une tentative complémentaire avec l'API Gemini 2.5 Flash Vision a été explorée (`extraction_gemini.py`).
 
 ## Installation
 
@@ -43,35 +53,68 @@ pip install -r requirements.txt
 python -m nltk.downloader stopwords
 ```
 
+**Dépendances système :** `tesseract-ocr`, `tesseract-ocr-fra`, `poppler-utils`
+
 ## Exécution
 
-### Partie A — Extraction
+### Partie A — Extraction du lexique Sara
 ```bash
 python exam/extraction.py
 ```
-Produit : `sara_wide.csv`, `sara_long.csv`, et 14 fichiers dans `data/pairs/`
+Produit : `sara_wide.csv`, `sara_long.csv`, 14 fichiers dans `data/pairs/`
 
-### Partie B — Exploration
+Variante Gemini (nécessite `GEMINI_API_KEY`) :
+```bash
+export GEMINI_API_KEY='votre_clé'
+python exam/extraction_gemini.py
+```
+
+### Partie B — Exploration statistique
 ```bash
 python exam/exploration.py
 ```
-Affiche les statistiques et génère les graphiques dans `figures/`
+Génère les graphiques dans `figures/`
 
-### Partie C — Analyse avancée
+### Partie C — Pipeline NLP médical
 ```bash
 python exam/analyse.py
 ```
-Applique Topic Modeling (LDA), Classification supervisée (NB, LR, SVM) et Clustering (K-Means, Hiérarchique) sur le dataset Medical Text.
+Pipeline complet : prétraitement, LDA (k=5..20), classification supervisée (GridSearchCV sur 4 modèles), clustering (K-Means + hiérarchique avec visualisation UMAP).
 
-## Dataset Partie C
+## Partie A — Extraction du lexique
 
-Dataset : **Medical Text** (Kaggle) — 14 438 résumés médicaux classés en 5 catégories :
-1. Maladies de l'appareil digestif
-2. Maladies cardiovasculaires
-3. Tumeurs
-4. Maladies du système nerveux
-5. Affections pathologiques générales
+| Approche | Résultat |
+|----------|----------|
+| pdfplumber / PyMuPDF / pdfminer | Texte corrompu (polices legacy sans ToUnicode) |
+| Mapping auto via XML_Data.zip | Échec : corruption non systématique |
+| OCR Tesseract LSTM (300 DPI) | **Adopté** — ~1104 termes, 10 600 paires, table de correction de ~10 entrées |
+| Gemini 2.5 Flash Vision | Qualité supérieure mais limité par quotas API (503) |
+
+## Partie B — Exploration
+
+- Couverture asymétrique : Ngambay et Mbay ≈ 100 %, Bediondo et Nar < 50 %
+- Longueur moyenne des mots : 4-6 caractères (Sara) vs 7-9 (français)
+- Heatmap binaire et nuages de mots pour les dialectes majoritaires
+
+## Partie C — NLP Médical
+
+**Dataset :** 14 438 résumés PubMed — 5 classes déséquilibrées
+
+| Modèle | Accuracy | F1-macro |
+|--------|----------|----------|
+| SVM linéaire | 0,601 | 0,544 |
+| Naive Bayes | 0,591 | 0,534 |
+| Régression logistique | 0,697 | 0,649 |
+| Forêt aléatoire | 0,459 | 0,340 |
+
+**Topic Modeling :** LDA optimal à k=10 (cohérence cv = 0,48)
+**Clustering :** Visualisation UMAP + dendrogramme hiérarchique
 
 ## Auteur
 
-Projet réalisé dans le cadre du cours de Text Mining.
+**BILAKE Tchaa Mèwè Angelo**  
+Licence Fondamentale Intelligence Artificielle & Big Data  
+Université de Lomé — École Polytechnique de Lomé  
+MTH1621: Data Mining — Année 2025-2026
+
+Sous la supervision de **Donald TITEMBAYE**.
